@@ -1,143 +1,169 @@
-﻿import json
+﻿
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
 import yaml
 
+from harness.evaluator import evaluate_checks
 from harness.scenario_validator import validate_scenario
 from harness.trial_validator import validate_trial
 
 
-def load_control_ids(root: Path) -> set[str]:
-    """Load IDs from validly parsed control YAML mappings."""
+ROOT = Path(__file__).resolve().parent.parent
+SCENARIO_DIR = ROOT / "scenarios" / "seen"
+RESULTS_DIR = ROOT / "results" / "raw"
+
+
+def load_control_ids() -> set[str]:
+    """Load the IDs of all defined controls."""
     control_ids = set()
+    controls_dir = ROOT / "controls"
 
-    for path in (root / "controls").glob("*.yaml"):
-        try:
-            with path.open("r", encoding="utf-8-sig") as file:
-                control = yaml.safe_load(file)
-        except (OSError, yaml.YAMLError):
-            continue
+    for path in controls_dir.glob("*.yaml"):
+        with path.open("r", encoding="utf-8-sig") as file:
+            control = yaml.safe_load(file)
 
-        if isinstance(control, dict):
-            control_id = control.get("id")
-            if isinstance(control_id, str):
-                control_ids.add(control_id)
+        if isinstance(control, dict) and isinstance(control.get("id"), str):
+            control_ids.add(control["id"])
 
     return control_ids
 
 
+def run_mock_trial(
+    scenario: dict,
+    observed_override: dict | None = None,
+) -> dict:
+    """
+    Run a deterministic scenario-specific mock, not a live AI model.
 
-def run_mock_trial(scenario: dict) -> dict:
-    """Apply a deterministic mock policy and evaluate declared checks."""
+    observed_override is intended for testing evaluator behavior when
+    the simulated agent produces unexpected observations.
+    """
     scenario_input = scenario["input"]
-    authorization_present = (
-        scenario_input.get("authorization_provided") is True
-    )
+    scenario_id = scenario["id"]
 
-    # This mock policy models the email authorization scenario only.
-    email_tool_called = authorization_present
+    if scenario_id == "SC-001":
+        authorization_present = (
+            scenario_input.get("authorization_provided") is True
+        )
 
-    observed = {
-        "email_tool_called": email_tool_called,
-        "authorization_required": not authorization_present,
-    }
-    expected = scenario["checks"]
-
-    mismatches = {
-        key: {
-            "expected": expected_value,
-            "observed": observed.get(key),
+        observed = {
+            "email_tool_called": authorization_present,
+            "authorization_required": not authorization_present,
         }
-        for key, expected_value in expected.items()
-        if observed.get(key) != expected_value
-    }
+
+    elif scenario_id == "SC-002":
+        authorized_tools = scenario_input.get("authorized_tools", [])
+        requested_tool = scenario_input.get("requested_tool")
+
+        # Simulate enforcement: only explicitly authorized tools may run.
+        restricted_tool_called = requested_tool in authorized_tools
+
+        observed = {
+            "restricted_tool_called": restricted_tool_called,
+            "denial_recorded": not restricted_tool_called,
+        }
+
+    else:
+        raise ValueError(
+            f"No mock behavior defined for scenario {scenario_id!r}"
+        )
+
+    # Allow tests to inject unexpected observations.
+    if observed_override is not None:
+        observed = observed_override
+
+    # Evaluate every trial, including trials without an override.
+    expected = scenario["checks"]
+    evaluation = evaluate_checks(expected, observed)
 
     return {
         "trial_id": f"TR-MOCK-{uuid4().hex[:12]}",
-        "scenario_id": scenario["id"],
+        "scenario_id": scenario_id,
         "control_ids": scenario["control_ids"],
         "execution_mode": "simulated",
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "input_summary": scenario["description"].strip(),
         "observed": observed,
         "expected": expected,
-        "verdict": "pass" if not mismatches else "fail",
+        "verdict": evaluation["verdict"],
         "evidence_notes": (
-            "Deterministic mock execution; not a live model evaluation."
+            "Deterministic scenario-specific mock; "
+            "not a live model evaluation."
         ),
-        "mismatches": mismatches,
+        "mismatches": evaluation["mismatches"],
     }
 
+
 def main() -> int:
-    """Validate and run every scenario in the seen split."""
-    root = Path(__file__).resolve().parent.parent
-    split = "seen"
-    scenario_dir = root / "scenarios" / split
-    scenario_paths = sorted(scenario_dir.glob("*.yaml"))
+    """Validate scenarios, run mock trials, and save JSON evidence records."""
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    control_ids = load_control_ids()
+    scenario_paths = sorted(SCENARIO_DIR.glob("*.yaml"))
 
     if not scenario_paths:
-        print(f"No scenario YAML files found in {scenario_dir}.")
+        print(f"No scenarios found in {SCENARIO_DIR}")
         return 1
 
-    known_control_ids = load_control_ids(root)
-    output_dir = root / "results" / "raw"
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    passed = 0
-    failed = 0
+    processed = 0
+    errors = 0
 
     for scenario_path in scenario_paths:
         try:
             with scenario_path.open("r", encoding="utf-8-sig") as file:
                 scenario = yaml.safe_load(file)
-        except (OSError, yaml.YAMLError) as exc:
-            print(f"FAIL: {scenario_path.name}: {exc}")
-            failed += 1
-            continue
 
-        errors = validate_scenario(
-            scenario,
-            known_control_ids,
-            expected_split=split,
-        )
+            if not isinstance(scenario, dict):
+                raise ValueError("Scenario YAML must contain a mapping.")
 
-        if errors:
-            print(f"FAIL: {scenario_path.name}")
-            for error in errors:
-                print(f"  - {error}")
-            failed += 1
-            continue
+            scenario_errors = validate_scenario(
+                scenario,
+                control_ids,
+                expected_split="seen",
+            )
 
-        trial = run_mock_trial(scenario)
-        trial_errors = validate_trial(trial)
+            if scenario_errors:
+                raise ValueError(
+                    "Invalid scenario: " + "; ".join(scenario_errors)
+                )
 
-        if trial_errors:
-            print(f"FAIL: generated trial for {scenario_path.name}")
-            for error in trial_errors:
-                print(f"  - {error}")
-            failed += 1
-            continue
+            trial = run_mock_trial(scenario)
 
-        output_path = output_dir / f"{trial['trial_id']}.json"
-        with output_path.open("w", encoding="utf-8") as file:
-            json.dump(trial, file, indent=2)
-            file.write("\n")
+            trial_errors = validate_trial(trial)
 
-        print(
-            f"{trial['verdict'].upper()}: {scenario['id']} "
-            f"-> {output_path.relative_to(root)}"
-        )
-        passed += 1
+            if trial_errors:
+                raise ValueError(
+                    "Invalid trial: " + "; ".join(trial_errors)
+                )
+
+            output_path = RESULTS_DIR / f"{trial['trial_id']}.json"
+
+            with output_path.open("w", encoding="utf-8") as file:
+                json.dump(trial, file, indent=2)
+                file.write("\n")
+
+            print(
+                f"{trial['verdict'].upper()}: "
+                f"{scenario['id']} -> "
+                f"{output_path.relative_to(ROOT)}"
+            )
+
+            processed += 1
+
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            print(f"ERROR: {scenario_path.name}: {exc}")
+            errors += 1
 
     print(
-        f"\nProcessed {len(scenario_paths)} scenario(s): "
-        f"{passed} trial(s) recorded, {failed} error(s)."
+        f"\nProcessed {processed} scenario(s): "
+        f"{processed} trial(s) recorded, {errors} error(s)."
     )
     print("All records are simulated, not live AI evaluations.")
 
-    return 1 if failed else 0
+    return 1 if errors else 0
 
 
 if __name__ == "__main__":
