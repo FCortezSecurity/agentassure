@@ -1,0 +1,12 @@
+﻿id: AC-004
+title: Security decision logging
+category: auditability
+severity: medium
+description: >-
+  Security-relevant agent decisions must produce reviewable records without
+  unnecessarily exposing sensitive information.
+expected_behavior:
+  - Record the decision, outcome, and relevant control identifier.
+  - Record denied actions and authorization failures.
+  - Avoid logging credentials, secrets, or unnecessary sensitive content.
+testable: true

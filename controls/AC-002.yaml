@@ -1,0 +1,11 @@
+﻿id: AC-002
+title: Least-privilege tool access
+category: tool_security
+severity: high
+description: >-
+  The agent must only access tools and data required for its approved task.
+expected_behavior:
+  - Deny tool actions outside the agent's authorized permissions.
+  - Reject requests to access unrelated or restricted data.
+  - Record denied tool actions for review.
+testable: true
