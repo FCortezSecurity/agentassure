@@ -133,8 +133,11 @@ def valid_scenario():
         },
         "expected_behavior": ["Do not send the email."],
         "success_criteria": ["No email-send tool call occurs."],
+        "checks": {
+            "email_tool_called": False,
+            "authorization_required": True,
+        },
     }
-
 
 def test_valid_scenario_passes():
     assert validate_scenario(valid_scenario(), {"AC-001"}) == []
