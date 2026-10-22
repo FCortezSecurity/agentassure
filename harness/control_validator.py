@@ -16,18 +16,17 @@ REQUIRED_FIELDS = {
 
 ALLOWED_SEVERITIES = {"critical", "high", "medium", "low"}
 CONTROL_ID_PATTERN = re.compile(r"^[A-Z][A-Z0-9]*-\d{3}$")
-
 TEXT_FIELDS = ("title", "category", "description")
 
 
 def validate_control(control: object) -> list[str]:
-    """Return validation errors for a single control definition."""
+    """Return validation errors for one control definition."""
     if not isinstance(control, dict):
         return ["Control must be a YAML mapping."]
 
     errors = []
-
     missing = REQUIRED_FIELDS - control.keys()
+
     if missing:
         errors.append(
             f"Missing required fields: {', '.join(sorted(missing))}"
@@ -37,9 +36,7 @@ def validate_control(control: object) -> list[str]:
     if not isinstance(control_id, str) or not CONTROL_ID_PATTERN.fullmatch(
         control_id
     ):
-        errors.append(
-            "id must use an uppercase identifier such as AC-001."
-        )
+        errors.append("id must use an uppercase identifier such as AC-001.")
 
     for field in TEXT_FIELDS:
         if field in control:
@@ -50,9 +47,7 @@ def validate_control(control: object) -> list[str]:
     if "severity" in control:
         severity = control["severity"]
         if not isinstance(severity, str) or severity not in ALLOWED_SEVERITIES:
-            errors.append(
-                "Severity must be critical, high, medium, or low."
-            )
+            errors.append("Severity must be critical, high, medium, or low.")
 
     if "expected_behavior" in control:
         behavior = control["expected_behavior"]
@@ -65,7 +60,8 @@ def validate_control(control: object) -> list[str]:
             )
         ):
             errors.append(
-                "expected_behavior must be a non-empty list of non-empty strings."
+                "expected_behavior must be a non-empty list "
+                "of non-empty strings."
             )
 
     if "testable" in control and not isinstance(control["testable"], bool):
@@ -85,32 +81,71 @@ def validate_control_file(path: Path) -> list[str]:
     return validate_control(control)
 
 
-def main() -> int:
-    """Validate all YAML controls in the repository."""
-    root = Path(__file__).resolve().parent.parent
-    control_files = sorted((root / "controls").glob("*.yaml"))
+def validate_control_directory(directory: Path) -> dict[str, list[str]]:
+    """Validate controls and cross-file ID/filename consistency."""
+    files = sorted(directory.glob("*.yaml"))
 
-    if not control_files:
-        print("ERROR: No control YAML files found.")
-        return 1
+    if not files:
+        return {"<directory>": ["No control YAML files found."]}
 
-    has_errors = False
+    results = {}
+    loaded_controls = {}
 
-    for path in control_files:
+    for path in files:
         errors = validate_control_file(path)
+        results[path.name] = errors
 
         if errors:
+            continue
+
+        try:
+            with path.open("r", encoding="utf-8-sig") as file:
+                control = yaml.safe_load(file)
+        except (OSError, yaml.YAMLError):
+            # Defensive: validate_control_file already reports this failure.
+            continue
+
+        control_id = control["id"]
+        loaded_controls.setdefault(control_id, []).append(path)
+
+        if path.stem != control_id:
+            results[path.name].append(
+                f"Filename must match control ID: expected {control_id}.yaml."
+            )
+
+    for control_id, paths in loaded_controls.items():
+        if len(paths) > 1:
+            filenames = ", ".join(path.name for path in paths)
+            for path in paths:
+                results[path.name].append(
+                    f"Duplicate control ID {control_id} found in: {filenames}."
+                )
+
+    return results
+
+
+def main() -> int:
+    """Validate every YAML control in the repository."""
+    root = Path(__file__).resolve().parent.parent
+    results = validate_control_directory(root / "controls")
+    has_errors = False
+    passed = 0
+
+    for filename, errors in results.items():
+        if errors:
             has_errors = True
-            print(f"FAIL: {path.name}")
+            print(f"FAIL: {filename}")
             for error in errors:
                 print(f"  - {error}")
         else:
-            print(f"PASS: {path.name}")
+            passed += 1
+            print(f"PASS: {filename}")
 
     if has_errors:
+        print("\nValidation failed. Fix the reported errors.")
         return 1
 
-    print(f"\nValidated {len(control_files)} control(s).")
+    print(f"\nValidated {passed} control(s).")
     return 0
 
 
